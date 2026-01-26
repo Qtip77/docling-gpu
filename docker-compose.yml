@@ -1,0 +1,84 @@
+volumes:
+  langgraph-data:
+    driver: local
+
+services:
+  # LangGraph Redis - Task queue and pub/sub
+  langgraph-redis:
+    image: redis:6
+    healthcheck:
+      test: redis-cli ping
+      interval: 5s
+      timeout: 1s
+      retries: 5
+    restart: unless-stopped
+
+  # LangGraph PostgreSQL - Checkpointing and thread state
+  langgraph-postgres:
+    image: postgres:16
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: langgraph
+      POSTGRES_USER: langgraph
+      POSTGRES_PASSWORD: langgraph
+    volumes:
+      - langgraph-data:/var/lib/postgresql/data
+    healthcheck:
+      test: pg_isready -U langgraph
+      start_period: 10s
+      timeout: 1s
+      retries: 5
+      interval: 5s
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./uploads:/app/uploads
+    env_file:
+      - .env
+    depends_on:
+      langgraph-redis:
+        condition: service_healthy
+      langgraph-postgres:
+        condition: service_healthy
+    # Enable GPU access for accelerated document processing
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - REDIS_URI=redis://langgraph-redis:6379
+      - DATABASE_URI=postgres://langgraph:langgraph@langgraph-postgres:5432/langgraph?sslmode=disable
+      # Disable xet/CAS downloads for HuggingFace Hub (firewall/proxy compatibility)
+      - HF_HUB_ENABLE_HF_TRANSFER=0
+      - HF_HUB_DISABLE_XET=1
+      # SSL certificates for corporate environments
+      - SSL_CERT_FILE=/etc/ssl/certs/bundle.pem
+      - REQUESTS_CA_BUNDLE=/etc/ssl/certs/bundle.pem
+      - CURL_CA_BUNDLE=/etc/ssl/certs/bundle.pem
+      # SSE streaming configuration
+      - STREAM_TIMEOUT=300
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    environment:
+      # API endpoint configuration
+      - VITE_API_BASE_URL=/api

@@ -1,0 +1,72 @@
+[project]
+name = "docling-backend"
+version = "0.1.0"
+description = "Document processing backend with Docling and RAG capabilities"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "torch",
+    "torchvision",
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.30.6",
+    "python-multipart==0.0.9",
+    "python-dotenv==1.0.1",
+    "docling~=2.12",
+    "easyocr>=1.7.0",
+    "azure-search-documents==11.5.2",
+    "azure-identity==1.17.1",
+    "openai>=1.50.0",
+    "httpx>=0.27.0,<0.28.0",
+    "rich==13.7.1",
+    "pydantic==2.9.1",
+    "pydantic-settings==2.5.2",
+    "aiofiles==24.1.0",
+    # LangGraph Multi-Agent RAG dependencies
+    "langgraph>=0.6.0",
+    "langchain>=0.3.0",
+    "langchain-openai>=0.2.0",
+    "langchain-community>=0.3.0",
+    "langchain-core>=0.3.0",
+    "langgraph-sdk>=0.1.66",
+    "langgraph-checkpoint>=2.0.23",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "psycopg[binary]>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+index-strategy = "unsafe-best-match"
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
