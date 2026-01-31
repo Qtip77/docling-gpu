@@ -36,8 +36,6 @@ services:
     build: ./backend
     ports:
       - "8000:8000"
-    volumes:
-      - ./uploads:/app/uploads
     env_file:
       - .env
     depends_on:
@@ -45,17 +43,7 @@ services:
         condition: service_healthy
       langgraph-postgres:
         condition: service_healthy
-    # Enable GPU access for accelerated document processing
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - REDIS_URI=redis://langgraph-redis:6379
       - DATABASE_URI=postgres://langgraph:langgraph@langgraph-postgres:5432/langgraph?sslmode=disable
       # Disable xet/CAS downloads for HuggingFace Hub (firewall/proxy compatibility)
@@ -73,12 +61,32 @@ services:
       timeout: 10s
       retries: 3
 
+  ingestion:
+    build: ./ingestion
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./uploads:/app/uploads
+    depends_on:
+      langgraph-redis:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://langgraph-redis:6379/1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   frontend:
     build: ./frontend
     ports:
       - "3000:80"
     depends_on:
       - backend
+      - ingestion
     environment:
       # API endpoint configuration
       - VITE_API_BASE_URL=/api

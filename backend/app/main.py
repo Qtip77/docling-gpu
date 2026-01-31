@@ -3,7 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import documents, search, chat, rag, rag_stream
+from app.routers import search, chat, rag, rag_stream
 
 # Configure logging
 logging.basicConfig(
@@ -12,8 +12,8 @@ logging.basicConfig(
 )
 
 app = FastAPI(
-    title="Docling RAG API",
-    description="RAG system using Docling, Azure AI Search, and Azure OpenAI with Multi-Agent LangGraph",
+    title="RAG API",
+    description="RAG system with Azure AI Search and Multi-Agent LangGraph",
     version="1.0.0"
 )
 
@@ -26,8 +26,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
-app.include_router(documents.router)
+# Include routers (documents moved to ingestion service)
 app.include_router(search.router)
 app.include_router(chat.router)
 app.include_router(rag.router)
@@ -41,4 +40,4 @@ async def health():
 
 @app.get("/")
 async def root():
-    return {"message": "Docling RAG API", "docs": "/docs"}
+    return {"message": "RAG API", "docs": "/docs"}
