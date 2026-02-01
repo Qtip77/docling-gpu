@@ -4,7 +4,8 @@ import logging
 from typing import Optional
 
 from app.models.schemas import JobStatus
-from app.services import azure_openai, azure_search, hierarchical_chunker, mistral_ocr
+from app.services import azure_openai, azure_search, mistral_ocr
+from app.services.hierarchical_chunker import chunk_ocr_result, ChunkConfig
 from app.workers import queue
 
 logger = logging.getLogger(__name__)
@@ -23,12 +24,13 @@ async def process_document(job_data: dict):
         await queue.update_job_status(job_id, JobStatus.PROCESSING)
         logger.info(f"Processing {filename} (job: {job_id})")
 
-        # OCR with Mistral
-        markdown, page_count = await mistral_ocr.process_document(file_path)
-        logger.info(f"OCR complete: {page_count} pages, {len(markdown)} chars")
+        # OCR with Mistral - returns full structured result
+        ocr_result = await mistral_ocr.process_document(file_path)
+        page_count = len(ocr_result.pages)
+        logger.info(f"OCR complete: {page_count} pages")
 
-        # Chunk markdown
-        chunks = hierarchical_chunker.chunk_markdown(markdown, filename)
+        # Chunk with page-aware chunking
+        chunks = chunk_ocr_result(ocr_result, filename, ChunkConfig())
         logger.info(f"Chunked into {len(chunks)} segments")
 
         if not chunks:
@@ -80,7 +82,6 @@ async def start_workers(count: int = 1):
         return
 
     _running = True
-    # For simplicity, run single worker. Can extend to multiple.
     _task = asyncio.create_task(worker_loop())
     logger.info(f"Started {count} worker(s)")
 

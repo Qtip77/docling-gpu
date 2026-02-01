@@ -1,7 +1,7 @@
 """Redis job queue for document processing (db=1)."""
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import redis.asyncio as redis
@@ -40,7 +40,7 @@ def _queue_key() -> str:
 async def enqueue_job(job_id: str, filename: str, file_path: str) -> ProcessingStatus:
     """Add job to processing queue."""
     r = await get_redis()
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     job_data = {
         "job_id": job_id,
@@ -86,7 +86,7 @@ async def update_job_status(
 ):
     """Update job status."""
     r = await get_redis()
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     updates = {"status": status.value, "updated_at": now}
     if chunks_count is not None:

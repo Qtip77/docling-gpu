@@ -155,9 +155,7 @@ async def upload_chunks_bulk(
 
     async def upload_batch(batch: list[dict]):
         async with semaphore:
-            # Run sync upload in executor
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: client.upload_documents(documents=batch))
+            await asyncio.to_thread(client.upload_documents, documents=batch)
 
     logger.info(f"Uploading {len(documents)} chunks in {len(batches)} batches")
     tasks = [upload_batch(batch) for batch in batches]

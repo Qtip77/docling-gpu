@@ -1,8 +1,9 @@
-"""Mistral OCR service with parallel page batch processing."""
+"""Mistral OCR service using Azure AI Services REST API."""
 import asyncio
 import base64
 import hashlib
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -12,124 +13,142 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-
-async def _ocr_batch(
-    client: httpx.AsyncClient,
-    doc_base64: str,
-    pages: list[int],
-    doc_type: str = "document_url",
-) -> dict:
-    """Process a batch of pages with Mistral OCR."""
-    # Mistral Azure MaaS OCR endpoint
-    url = f"{settings.mistral_azure_endpoint.rstrip('/')}/v1/ocr"
-
-    payload = {
-        "model": "mistral-ocr-latest",
-        "document": {
-            "type": "base64",
-            "data": doc_base64,
-        },
-        "include_image_base64": False,
-    }
-
-    # Add page range if specified
-    if pages:
-        payload["pages"] = pages
-
-    headers = {
-        "Authorization": f"Bearer {settings.mistral_azure_api_key}",
-        "Content-Type": "application/json",
-    }
-
-    response = await client.post(
-        url,
-        json=payload,
-        headers=headers,
-        timeout=settings.ocr_timeout,
-    )
-    response.raise_for_status()
-    return response.json()
+_client: httpx.AsyncClient | None = None
 
 
-async def process_document(file_path: str) -> tuple[str, int]:
+@dataclass
+class PageImage:
+    """Image extracted from a page."""
+    id: str
+    base64: Optional[str] = None
+    top_left: tuple[int, int] = (0, 0)
+    bottom_right: tuple[int, int] = (0, 0)
+
+
+@dataclass
+class PageTable:
+    """Table extracted from a page."""
+    id: str
+    content: str  # HTML or markdown
+    top_left: tuple[int, int] = (0, 0)
+    bottom_right: tuple[int, int] = (0, 0)
+
+
+@dataclass
+class PageResult:
+    """OCR result for a single page."""
+    index: int
+    markdown: str
+    images: list[PageImage] = field(default_factory=list)
+    tables: list[PageTable] = field(default_factory=list)
+    hyperlinks: list[dict] = field(default_factory=list)
+    header: Optional[str] = None
+    footer: Optional[str] = None
+    dimensions: dict = field(default_factory=dict)
+
+
+@dataclass
+class OCRResult:
+    """Full OCR result with all pages and metadata."""
+    pages: list[PageResult]
+    model: str
+    document_annotation: Optional[dict] = None
+    usage_info: dict = field(default_factory=dict)
+
+
+def get_client() -> httpx.AsyncClient:
+    """Get or create async HTTP client."""
+    global _client
+    if _client is None:
+        _client = httpx.AsyncClient(timeout=httpx.Timeout(settings.ocr_timeout))
+    return _client
+
+
+async def process_document(file_path: str) -> OCRResult:
     """
-    Process document with Mistral OCR using parallel page batches.
-    Returns (markdown_content, page_count).
+    Process document with Mistral Document AI on Azure.
+    Returns full OCRResult with page-level metadata.
     """
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File not found: {file_path}")
 
-    # Read and encode file
     with open(file_path, "rb") as f:
         doc_bytes = f.read()
     doc_base64 = base64.standard_b64encode(doc_bytes).decode("utf-8")
 
-    async with httpx.AsyncClient() as client:
-        # First, get page count with a minimal request
-        initial = await _ocr_batch(client, doc_base64, [1])
-        
-        # Extract page count from response
-        page_count = initial.get("pages_processed", 1)
-        if "document" in initial and "page_count" in initial["document"]:
-            page_count = initial["document"]["page_count"]
+    suffix = path.suffix.lower()
+    mime_map = {
+        ".pdf": "application/pdf",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    }
+    mime_type = mime_map.get(suffix, "application/pdf")
 
-        # For single-page or small docs, return immediately
-        if page_count <= settings.ocr_page_batch_size:
-            result = await _ocr_batch(client, doc_base64, [])
-            markdown = _extract_markdown(result)
-            return markdown, page_count
+    client = get_client()
 
-        # Create page batches for parallel processing
-        batches = []
-        batch_size = settings.ocr_page_batch_size
-        for i in range(1, page_count + 1, batch_size):
-            batch_pages = list(range(i, min(i + batch_size, page_count + 1)))
-            batches.append(batch_pages)
+    payload = {
+        "model": "mistral-document-ai-2505",
+        "document": {
+            "type": "document_url",
+            "document_url": f"data:{mime_type};base64,{doc_base64}",
+        },
+        "include_image_base64": False,
+    }
 
-        logger.info(f"Processing {page_count} pages in {len(batches)} batches")
+    response = await client.post(
+        settings.mistral_azure_endpoint,
+        json=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {settings.mistral_azure_api_key}",
+        },
+    )
+    response.raise_for_status()
+    data = response.json()
 
-        # Process batches with concurrency limit
-        semaphore = asyncio.Semaphore(settings.ocr_max_concurrent)
+    # Parse into structured result
+    pages = []
+    for p in data.get("pages", []):
+        images = [
+            PageImage(
+                id=img.get("id", ""),
+                base64=img.get("image_base64"),
+                top_left=tuple(img.get("top_left_x", 0), img.get("top_left_y", 0)) if "top_left_x" in img else (0, 0),
+                bottom_right=tuple(img.get("bottom_right_x", 0), img.get("bottom_right_y", 0)) if "bottom_right_x" in img else (0, 0),
+            )
+            for img in p.get("images", [])
+        ]
+        tables = [
+            PageTable(
+                id=tbl.get("id", ""),
+                content=tbl.get("content", ""),
+            )
+            for tbl in p.get("tables", [])
+        ]
+        pages.append(PageResult(
+            index=p.get("index", 0),
+            markdown=p.get("markdown", ""),
+            images=images,
+            tables=tables,
+            hyperlinks=p.get("hyperlinks", []),
+            header=p.get("header"),
+            footer=p.get("footer"),
+            dimensions=p.get("dimensions", {}),
+        ))
 
-        async def process_batch(pages: list[int]) -> dict:
-            async with semaphore:
-                return await _ocr_batch(client, doc_base64, pages)
+    result = OCRResult(
+        pages=pages,
+        model=data.get("model", ""),
+        document_annotation=data.get("document_annotation"),
+        usage_info=data.get("usage_info", {}),
+    )
 
-        tasks = [process_batch(batch) for batch in batches]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        # Combine results in order
-        all_markdown = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                logger.error(f"Batch {i} failed: {result}")
-                continue
-            all_markdown.append(_extract_markdown(result))
-
-        combined = "\n\n".join(all_markdown)
-        return combined, page_count
-
-
-def _extract_markdown(result: dict) -> str:
-    """Extract markdown from OCR response."""
-    # Mistral OCR returns pages with markdown content
-    if "pages" in result:
-        parts = []
-        for page in result["pages"]:
-            if "markdown" in page:
-                parts.append(page["markdown"])
-        return "\n\n".join(parts)
-
-    # Fallback: check for direct markdown field
-    if "markdown" in result:
-        return result["markdown"]
-
-    # Last resort: check text field
-    if "text" in result:
-        return result["text"]
-
-    return ""
+    logger.info(f"OCR complete: {len(pages)} pages")
+    return result
 
 
 def generate_chunk_id(filename: str, chunk_idx: int) -> str:
