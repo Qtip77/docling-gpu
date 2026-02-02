@@ -289,25 +289,27 @@ def _extract_tables_as_chunks(
     start_idx: int,
     timestamp: str,
 ) -> tuple[list[DocumentChunk], str]:
-    """Extract markdown tables as separate chunks."""
+    """Extract markdown and HTML tables as separate chunks."""
     import re
     
     chunks = []
     chunk_idx = start_idx
+    remaining = markdown
     
-    table_pattern = re.compile(
+    # Match markdown pipe tables
+    md_table_pattern = re.compile(
         r"(\|[^\n]+\|\n(?:\|[-:| ]+\|\n)?(?:\|[^\n]+\|\n?)+)",
         re.MULTILINE
     )
+    # Match HTML tables (Mistral often returns these)
+    html_table_pattern = re.compile(
+        r"(<table[^>]*>[\s\S]*?</table>)",
+        re.IGNORECASE
+    )
 
-    remaining = markdown
-    for match in table_pattern.finditer(markdown):
-        table_content = match.group(1).strip()
-        if len(table_content) < 30:
-            continue
-
+    def create_table_chunk(table_content: str) -> DocumentChunk:
+        nonlocal chunk_idx
         chunk_id = generate_chunk_id(filename, chunk_idx)
-        
         metadata = ChunkMetadata(
             page_numbers=[page_num],
             section_title=None,
@@ -316,13 +318,23 @@ def _extract_tables_as_chunks(
             chunk_type="table",
             indexed_at=timestamp,
         )
-
-        chunks.append(DocumentChunk(
-            chunk_id=chunk_id,
-            content=table_content,
-            metadata=metadata,
-        ))
         chunk_idx += 1
+        return DocumentChunk(chunk_id=chunk_id, content=table_content, metadata=metadata)
+
+    # Extract markdown tables
+    for match in md_table_pattern.finditer(markdown):
+        table_content = match.group(1).strip()
+        if len(table_content) < 30:
+            continue
+        chunks.append(create_table_chunk(table_content))
+        remaining = remaining.replace(match.group(0), "\n[TABLE EXTRACTED]\n", 1)
+
+    # Extract HTML tables
+    for match in html_table_pattern.finditer(remaining):
+        table_content = match.group(1).strip()
+        if len(table_content) < 30:
+            continue
+        chunks.append(create_table_chunk(table_content))
         remaining = remaining.replace(match.group(0), "\n[TABLE EXTRACTED]\n", 1)
 
     return chunks, remaining
