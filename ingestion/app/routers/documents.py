@@ -115,3 +115,35 @@ async def delete_document(doc_id: str):
     """Delete a document and its chunks."""
     deleted = azure_search.delete_document_chunks(doc_id)
     return {"deleted_chunks": deleted}
+
+
+@router.post("/compare-chunking/{job_id}")
+async def compare_chunking(job_id: str):
+    """
+    Compare hierarchical vs agentic chunking on an uploaded document.
+    Useful for evaluating which strategy works best for your document types.
+    """
+    from pathlib import Path
+    from app.services.mistral_ocr import process_document as ocr_process
+    from app.services.agentic_chunker import compare_chunking_strategies
+    
+    # Find the file
+    upload_dir = Path(settings.upload_dir)
+    matches = list(upload_dir.glob(f"{job_id}_*"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    file_path = matches[0]
+    filename = file_path.name.split("_", 1)[1] if "_" in file_path.name else file_path.name
+    
+    # Run OCR
+    ocr_result = await ocr_process(str(file_path))
+    
+    # Compare strategies
+    comparison = await compare_chunking_strategies(ocr_result, filename)
+    
+    return {
+        "filename": filename,
+        "pages": len(ocr_result.pages),
+        "comparison": comparison,
+    }
