@@ -4,16 +4,18 @@ Best for: contracts, legal agreements, vote ballots, cost estimates
 Trade-off: ~2-5s per page (LLM calls) vs ~10ms for rule-based chunking
 """
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional, Literal
 
 from chonkie import SlumberChunker
 from chonkie.genie import AzureOpenAIGenie
+from openai import AzureOpenAI
 
 from app.config import settings
 from app.models.schemas import ChunkMetadata, DocumentChunk
-from app.services.mistral_ocr import OCRResult, generate_chunk_id
+from app.services.mistral_ocr import OCRResult, PageResult, PageImage, generate_chunk_id
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,145 @@ class AgenticChunkConfig:
     model: str = "gpt-4o-mini"  # Cost-effective for chunking decisions
     preserve_tables: bool = True
     verbose: bool = False
+    describe_images: bool = True  # Use vision model to describe images
 
 
 _genie: Optional[AzureOpenAIGenie] = None
 _chunker: Optional[SlumberChunker] = None
+_vision_client: Optional[AzureOpenAI] = None
+
+
+def get_vision_client() -> AzureOpenAI:
+    """Get Azure OpenAI client for vision tasks."""
+    global _vision_client
+    if _vision_client is None:
+        _vision_client = AzureOpenAI(
+            api_key=settings.azure_openai_api_key,
+            api_version=settings.azure_openai_api_version,
+            azure_endpoint=settings.azure_openai_endpoint,
+        )
+    return _vision_client
+
+
+def _clean_base64(b64: str) -> str:
+    """Clean base64 string for API consumption."""
+    # Remove data URI prefix if present
+    if b64.startswith("data:"):
+        b64 = b64.split(",", 1)[-1]
+    # Remove whitespace/newlines
+    b64 = b64.replace("\n", "").replace("\r", "").replace(" ", "")
+    # Ensure proper padding
+    padding = 4 - (len(b64) % 4)
+    if padding != 4:
+        b64 += "=" * padding
+    return b64
+
+
+def _validate_base64(b64: str) -> bool:
+    """Check if base64 string is valid."""
+    import base64
+    try:
+        decoded = base64.b64decode(b64)
+        # Check for common image magic bytes
+        if decoded[:2] == b'\xff\xd8':  # JPEG
+            return True
+        if decoded[:8] == b'\x89PNG\r\n\x1a\n':  # PNG
+            return True
+        if decoded[:6] in (b'GIF87a', b'GIF89a'):  # GIF
+            return True
+        if decoded[:4] == b'RIFF' and decoded[8:12] == b'WEBP':  # WebP
+            return True
+        # Allow if it decodes successfully even without magic bytes
+        return len(decoded) > 100
+    except Exception:
+        return False
+
+
+def describe_image(image: PageImage, context: str = "") -> str:
+    """Generate description for an image using vision model."""
+    if not image.base64:
+        return f"[IMAGE: {image.id}]"
+    
+    # Clean and validate base64
+    clean_b64 = _clean_base64(image.base64)
+    if not _validate_base64(clean_b64):
+        logger.warning(f"Invalid base64 data for {image.id} (len={len(image.base64)}, prefix={image.base64[:50]}...)")
+        return f"[IMAGE: {image.id}]"
+    
+    try:
+        client = get_vision_client()
+        
+        # Determine image mime type from ID
+        mime_type = "image/jpeg"
+        if image.id.endswith(".png"):
+            mime_type = "image/png"
+        elif image.id.endswith(".gif"):
+            mime_type = "image/gif"
+        elif image.id.endswith(".webp"):
+            mime_type = "image/webp"
+        
+        response = client.chat.completions.create(
+            model=settings.agentic_vision_model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Describe this image concisely for document search indexing. Focus on: diagrams, charts, text content, key visual elements. Keep under 100 words."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:{mime_type};base64,{clean_b64}",
+                                "detail": "low"
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": f"Document context: {context[:200]}" if context else "Describe this image."
+                        }
+                    ]
+                }
+            ],
+            max_tokens=150,
+        )
+        description = response.choices[0].message.content.strip()
+        return f"[IMAGE: {description}]"
+    except Exception as e:
+        logger.warning(f"Failed to describe image {image.id}: {e}")
+        return f"[IMAGE: {image.id}]"
+
+
+def _expand_image_placeholders(
+    markdown: str, 
+    page: PageResult, 
+    describe: bool = True
+) -> str:
+    """Replace image placeholders with descriptions or markers."""
+    # Build lookup of images by ID
+    image_map = {img.id: img for img in page.images}
+    
+    # Pattern matches ![img-0.jpeg](img-0.jpeg) or ![alt](filename.ext)
+    img_pattern = re.compile(r'!\[([^\]]*)\]\(([^)]+)\)')
+    
+    def replace_image(match):
+        alt_text = match.group(1)
+        img_id = match.group(2)
+        
+        if describe and img_id in image_map:
+            img = image_map[img_id]
+            if img.base64:
+                # Get surrounding context for better description
+                start = max(0, match.start() - 200)
+                end = min(len(markdown), match.end() + 200)
+                context = markdown[start:end]
+                return describe_image(img, context)
+        
+        # Fallback to simple marker
+        return f"[IMAGE: {alt_text or img_id}]"
+    
+    return img_pattern.sub(replace_image, markdown)
 
 
 def get_genie(model: str = "gpt-4o-mini") -> AzureOpenAIGenie:
@@ -90,6 +227,9 @@ def chunk_ocr_result_agentic(
 
         if not markdown or len(markdown.strip()) < config.min_characters_per_chunk:
             continue
+
+        # Expand image placeholders with descriptions
+        markdown = _expand_image_placeholders(markdown, page, describe=config.describe_images)
 
         # Extract tables first if configured (same as hierarchical chunker)
         table_chunks = []
@@ -213,6 +353,8 @@ def _detect_chunk_type(content: str) -> str:
         return "table"
     if re.search(r"^```", content, re.MULTILINE):
         return "code"
+    if re.search(r"\[IMAGE:", content):
+        return "image_context"
     if re.search(r"^\s*[-*]\s", content, re.MULTILINE):
         return "list"
     if re.search(r"^\s*\d+\.\s", content, re.MULTILINE):

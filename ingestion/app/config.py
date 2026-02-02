@@ -32,7 +32,9 @@ class Settings(BaseSettings):
     
     # Agentic chunking config (only used if chunking_strategy="agentic")
     agentic_chunk_size: int = 1024  # Target tokens per chunk
-    agentic_model: str = "gpt-4o-mini"  # Model for chunking decisions
+    agentic_model: str = "gpt-4.1-mini"  # Model for chunking decisions
+    agentic_describe_images: bool = True  # Use vision model to describe images
+    agentic_vision_model: str = "gpt-4o"  # Vision model for image descriptions
 
     # Embedding
     embedding_batch_size: int = 500

@@ -125,7 +125,12 @@ def _parse_ocr_response(data: dict, page_offset: int = 0) -> list[PageResult]:
     return pages
 
 
-async def _ocr_single_chunk(client: httpx.AsyncClient, doc_base64: str, mime_type: str) -> dict:
+async def _ocr_single_chunk(
+    client: httpx.AsyncClient, 
+    doc_base64: str, 
+    mime_type: str,
+    include_images: bool = False
+) -> dict:
     """Call OCR API for a single document chunk with retries."""
     payload = {
         "model": settings.mistral_azure_model,
@@ -133,7 +138,7 @@ async def _ocr_single_chunk(client: httpx.AsyncClient, doc_base64: str, mime_typ
             "type": "document_url",
             "document_url": f"data:{mime_type};base64,{doc_base64}",
         },
-        "include_image_base64": False,
+        "include_image_base64": include_images,
     }
 
     max_retries = 3
@@ -165,10 +170,14 @@ async def _ocr_single_chunk(client: httpx.AsyncClient, doc_base64: str, mime_typ
     return response.json()
 
 
-async def process_document(file_path: str) -> OCRResult:
+async def process_document(file_path: str, include_images: bool = False) -> OCRResult:
     """
     Process document with Mistral Document AI on Azure.
     Automatically splits large PDFs (>30 pages) into chunks.
+    
+    Args:
+        file_path: Path to document file
+        include_images: Include base64 image data for vision processing
     """
     path = Path(file_path)
     if not path.exists():
@@ -206,7 +215,7 @@ async def process_document(file_path: str) -> OCRResult:
         
         logger.info(f"Processing chunk {chunk_idx + 1}/{len(chunks)} (pages {page_offset + 1}-{page_offset + max_pages})")
         
-        data = await _ocr_single_chunk(client, chunk_b64, mime_type)
+        data = await _ocr_single_chunk(client, chunk_b64, mime_type, include_images)
         
         pages = _parse_ocr_response(data, page_offset)
         all_pages.extend(pages)

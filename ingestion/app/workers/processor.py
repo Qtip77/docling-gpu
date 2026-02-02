@@ -23,10 +23,19 @@ def get_chunks(ocr_result, filename: str):
         config = AgenticChunkConfig(
             chunk_size=settings.agentic_chunk_size,
             model=settings.agentic_model,
+            describe_images=settings.agentic_describe_images,
         )
         return chunk_ocr_result_agentic(ocr_result, filename, config)
     else:
         return chunk_ocr_result(ocr_result, filename, ChunkConfig())
+
+
+def should_include_images() -> bool:
+    """Check if OCR should include image base64 for processing."""
+    return (
+        settings.chunking_strategy == "agentic" 
+        and settings.agentic_describe_images
+    )
 
 
 async def process_document(job_data: dict):
@@ -40,7 +49,8 @@ async def process_document(job_data: dict):
         logger.info(f"Processing {filename} (job: {job_id}) [strategy: {settings.chunking_strategy}]")
 
         # OCR with Mistral - returns full structured result
-        ocr_result = await mistral_ocr.process_document(file_path)
+        # Include image base64 when using agentic chunking with image descriptions
+        ocr_result = await mistral_ocr.process_document(file_path, include_images=should_include_images())
         page_count = len(ocr_result.pages)
         logger.info(f"OCR complete: {page_count} pages")
 
